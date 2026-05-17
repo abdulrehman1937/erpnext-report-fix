@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import frappe
-from frappe import qb
 from frappe.utils import flt
 
 from erpnext.accounts.report.gross_profit.gross_profit import GrossProfitGenerator
@@ -12,155 +11,75 @@ from erpnext.accounts.report.gross_profit.gross_profit import GrossProfitGenerat
 
 class GrossProfitGeneratorFixed(GrossProfitGenerator):
 	"""
-	Stock Ledger rows for bundle components use ``voucher_detail_no`` = `tabPacked Item`.`name`.
-	The standard report uses the parent Sales Invoice Item / DN row name, so COGS resolves to 0
-	and gross profit shows as 100% of revenue.
+	Fixes the Gross Profit report for product bundles whose Sales Invoice has
+	``update_stock=False`` and no ``dn_detail`` written back (the linked DN
+	exists but the back-reference was never set). The bundle parent is a
+	non-stock item, so the standard report finds no SLE for it and reports
+	100% margin.
 
-	This subclass aligns ``item_row`` with the packed-item row before valuation lookups.
+	For invoices where ``dn_detail`` IS set, the standard ERPNext flow already
+	works on this installation — SLEs use the DN bundle parent's item row as
+	``voucher_detail_no``, which equals ``row.dn_detail`` after process(). We
+	intentionally do NOT override ``item_row`` to ``packed_item.name``.
 	"""
 
-	def load_product_bundle(self):
-		self.product_bundles = {}
-		pki = qb.DocType("Packed Item")
-		pki_query = (
-			frappe.qb.from_(pki)
-			.select(
-				pki.parenttype,
-				pki.parent,
-				pki.parent_item,
-				pki.item_code,
-				pki.warehouse,
-				(-1 * pki.qty).as_("total_qty"),
-				pki.rate,
-				(pki.rate * pki.qty).as_("base_amount"),
-				pki.parent_detail_docname,
-				pki.serial_and_batch_bundle,
-				pki.name,
-			)
-			.where(pki.docstatus == 1)
-		)
-		for d in pki_query.run(as_dict=True):
-			self.product_bundles.setdefault(d.parenttype, frappe._dict()).setdefault(
-				d.parent, frappe._dict()
-			).setdefault(d.parent_item, []).append(d)
-
 	def get_buying_amount(self, row, item_code):
-		self._fix_packed_item_voucher_detail_no(row)
-
-		# process() leaves product_bundles=[] when update_stock=False and dn_detail=None,
-		# so bundle parent rows fall through here. For non-stock bundle parents super()
-		# returns 0 (no SLEs). Resolve packed items from SI → SO → bundle definition.
+		# Only fires for bundle parent rows that process() couldn't resolve
+		# (update_stock=False AND dn_detail=None AND parent set).
 		if not row.get("update_stock") and not row.get("dn_detail") and row.get("parent"):
-			si_bundles = (
-				self.product_bundles.get("Sales Invoice", {})
-				.get(row.get("parent"), frappe._dict())
-			)
-			if item_code in si_bundles:
-				return flt(
-					self.get_buying_amount_from_product_bundle(row, si_bundles[item_code]),
-					self.currency_precision,
-				)
-
-			# SI with update_stock=False usually has no tabPacked Item rows. Fall back to
-			# the linked Sales Order, scaling qty if the SI invoices only part of the SO.
-			if row.get("sales_order") and row.get("so_detail"):
-				so_packed = (
-					self.product_bundles.get("Sales Order", {})
-					.get(row.get("sales_order"), frappe._dict())
-					.get(item_code, [])
-				)
-				so_packed = [
-					p for p in so_packed
-					if p.get("parent_detail_docname") == row.get("so_detail")
-				]
-				if so_packed:
-					return flt(
-						self._buying_amount_from_packed_list(row, so_packed),
-						self.currency_precision,
-					)
-
-			# Last resort: synthesize components from the Product Bundle definition.
 			if frappe.db.exists("Product Bundle", item_code):
-				return flt(
-					self._buying_amount_from_bundle_definition(row, item_code),
-					self.currency_precision,
-				)
-
+				resolved = self._resolve_bundle_cogs(row, item_code)
+				if resolved is not None:
+					return flt(resolved, self.currency_precision)
 		return super().get_buying_amount(row, item_code)
 
-	def _buying_amount_from_packed_list(self, row, packed_list):
-		"""Sum buying amount across pre-filtered packed items, scaling for partial invoicing."""
-		scale = 1.0
-		if row.get("so_detail") and row.get("qty"):
-			so_qty = frappe.db.get_value("Sales Order Item", row.get("so_detail"), "qty")
-			if so_qty:
-				scale = flt(row.qty) / flt(so_qty)
-		buying_amount = 0.0
-		for packed_item in packed_list:
-			packed_item_row = row.copy()
-			packed_item_row.item_code = packed_item.item_code
-			packed_item_row.warehouse = packed_item.warehouse
-			packed_item_row.qty = (packed_item.total_qty * -1) * scale
-			packed_item_row.serial_and_batch_bundle = packed_item.serial_and_batch_bundle
-			packed_item_row.item_row = packed_item.name
-			buying_amount += self.get_buying_amount(packed_item_row, packed_item.item_code)
-		return buying_amount
+	def _resolve_bundle_cogs(self, row, item_code):
+		# Prefer Sales Order packed items (linked via so_detail), scaled if
+		# the SI invoices a partial qty of the SO.
+		if row.get("sales_order") and row.get("so_detail"):
+			so_packed = (
+				self.product_bundles.get("Sales Order", {})
+				.get(row.get("sales_order"), frappe._dict())
+				.get(item_code, [])
+			)
+			so_packed = [
+				p for p in so_packed
+				if p.get("parent_detail_docname") == row.get("so_detail")
+			]
+			if so_packed:
+				return self._sum_from_packed(row, so_packed, scale_from_so=True)
 
-	def _buying_amount_from_bundle_definition(self, row, item_code):
-		"""Compute COGS by walking the Product Bundle definition × row.qty."""
+		# Fall back to the Product Bundle definition (× row.qty).
 		components = frappe.db.get_all(
 			"Product Bundle Item",
 			filters={"parent": item_code},
 			fields=["item_code", "qty"],
 		)
+		if components:
+			synthetic = [
+				frappe._dict({
+					"item_code": c.item_code,
+					"total_qty": -flt(c.qty) * flt(row.qty),
+					"warehouse": row.get("warehouse"),
+					"serial_and_batch_bundle": None,
+				})
+				for c in components
+			]
+			return self._sum_from_packed(row, synthetic, scale_from_so=False)
+		return None
+
+	def _sum_from_packed(self, row, packed_list, scale_from_so):
+		scale = 1.0
+		if scale_from_so and row.get("so_detail") and row.get("qty"):
+			so_qty = frappe.db.get_value("Sales Order Item", row.get("so_detail"), "qty")
+			if so_qty:
+				scale = flt(row.qty) / flt(so_qty)
 		buying_amount = 0.0
-		for component in components:
+		for packed_item in packed_list:
 			component_row = row.copy()
-			component_row.item_code = component.item_code
-			component_row.qty = flt(component.qty) * flt(row.qty)
-			buying_amount += self.get_buying_amount(component_row, component.item_code)
+			component_row.item_code = packed_item.item_code
+			component_row.warehouse = packed_item.get("warehouse") or row.get("warehouse")
+			component_row.qty = (flt(packed_item.total_qty) * -1) * scale
+			component_row.serial_and_batch_bundle = packed_item.get("serial_and_batch_bundle")
+			buying_amount += self.get_buying_amount(component_row, packed_item.item_code)
 		return buying_amount
-
-	def get_buying_amount_from_product_bundle(self, row, product_bundle):
-		buying_amount = 0.0
-		for packed_item in product_bundle:
-			if packed_item.get("parent_detail_docname") == row.item_row:
-				packed_item_row = row.copy()
-				packed_item_row.item_code = packed_item.item_code
-				packed_item_row.warehouse = packed_item.warehouse
-				packed_item_row.qty = packed_item.total_qty * -1
-				packed_item_row.serial_and_batch_bundle = packed_item.serial_and_batch_bundle
-				packed_item_row.item_row = packed_item.name
-				buying_amount += self.get_buying_amount(packed_item_row, packed_item.item_code)
-		return flt(buying_amount, self.currency_precision)
-
-	def _fix_packed_item_voucher_detail_no(self, row):
-		"""Expand-tree rows only (indent > 1): map SI/DN child name → Packed Item name."""
-		if self.filters.get("group_by") != "Invoice":
-			return
-		if not row.get("indent") or row.indent <= 1:
-			return
-		if not row.get("parent_invoice"):
-			return
-
-		parent_detail_docname = row.item_row
-		candidates = []
-		if row.get("delivery_note") and row.get("dn_detail"):
-			candidates = (
-				self.product_bundles.get("Delivery Note", {})
-				.get(row.delivery_note, frappe._dict())
-				.get(row.parent_invoice, [])
-			)
-		elif row.get("invoice"):
-			candidates = (
-				self.product_bundles.get("Sales Invoice", {})
-				.get(row.invoice, frappe._dict())
-				.get(row.parent_invoice, [])
-			)
-		for pi in candidates:
-			if (
-				pi.item_code == row.item_code
-				and pi.get("parent_detail_docname") == parent_detail_docname
-			):
-				row.item_row = pi.name
-				break
