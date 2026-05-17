@@ -30,6 +30,7 @@ def remove_patch() -> None:
 
 	gross_profit_module.GrossProfitGenerator = _original_gross_profit_generator
 	_patch_applied = False
+	_original_gross_profit_generator = None
 
 
 def _bootstrap_patch() -> None:
