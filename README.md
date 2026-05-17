@@ -20,15 +20,27 @@ This app replaces the report generator with a small subclass that:
 
 ## Install
 
-From your bench directory. The repo slug uses hyphens, but the app folder **must** be `erpnext_report_fix` (Python import path):
+> **Important:** Do **not** use `bench get-app <url>` directly — bench derives the folder name from the URL (`erpnext-report-fix`, with hyphens) but Frappe's build system requires the folder to match the Python package name (`erpnext_report_fix`, with underscores). This mismatch causes the build step to crash.
+
+**Option A — skip-assets (recommended, one-liner):**
+
+```bash
+bench get-app --skip-assets https://github.com/abdulrehman1937/erpnext-report-fix.git
+bench --site your.site install-app erpnext_report_fix
+bench restart
+```
+
+**Option B — manual clone (explicit folder name):**
 
 ```bash
 cd /path/to/frappe-bench/apps
 git clone https://github.com/abdulrehman1937/erpnext-report-fix.git erpnext_report_fix
-
-cd .. && bench --site your.site install-app erpnext_report_fix
+cd ..
+bench --site your.site install-app erpnext_report_fix
 bench restart
 ```
+
+Both options are equivalent. `--skip-assets` is correct here because this app has no JavaScript or CSS — it is a pure Python monkey-patch.
 
 ## Uninstall
 
