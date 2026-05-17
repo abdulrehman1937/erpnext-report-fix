@@ -20,13 +20,13 @@ This app replaces the report generator with a small subclass that:
 
 ## Install
 
-From your bench directory:
+From your bench directory. The repo slug uses hyphens, but the app folder **must** be `erpnext_report_fix` (Python import path):
 
 ```bash
-# Get the app (or clone into apps/erpnext_report_fix)
-bench get-app https://github.com/abdulrehman1937/erpnext-report-fix.git
+cd /path/to/frappe-bench/apps
+git clone https://github.com/abdulrehman1937/erpnext-report-fix.git erpnext_report_fix
 
-bench --site your.site install-app erpnext_report_fix
+cd .. && bench --site your.site install-app erpnext_report_fix
 bench restart
 ```
 
