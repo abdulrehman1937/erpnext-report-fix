@@ -14,5 +14,11 @@ required_apps = ["erpnext"]
 # each worker process before any report can run.
 before_request = ["erpnext_report_fix.monkeypatch.apply_patch"]
 
+# Belt-and-suspenders: intercept the exact API endpoint Frappe calls for
+# every report run. apply_patch() is idempotent so the double-call is free.
+override_whitelisted_methods = {
+    "frappe.desk.query_report.run": "erpnext_report_fix.query_report_patch.run"
+}
+
 after_install = "erpnext_report_fix.install.after_install"
 before_uninstall = "erpnext_report_fix.uninstall.before_uninstall"
