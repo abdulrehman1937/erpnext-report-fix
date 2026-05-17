@@ -46,6 +46,21 @@ class GrossProfitGeneratorFixed(GrossProfitGenerator):
 
 	def get_buying_amount(self, row, item_code):
 		self._fix_packed_item_voucher_detail_no(row)
+
+		# process() leaves product_bundles=[] when update_stock=False and dn_detail=None,
+		# so bundle parent rows fall through here and super() returns 0 (non-stock, no SLE).
+		# Intercept: look up SI packed items and compute per-component buying amount instead.
+		if not row.get("update_stock") and not row.get("dn_detail") and row.get("parent"):
+			si_bundles = (
+				self.product_bundles.get("Sales Invoice", {})
+				.get(row.get("parent"), frappe._dict())
+			)
+			if item_code in si_bundles:
+				return flt(
+					self.get_buying_amount_from_product_bundle(row, si_bundles[item_code]),
+					self.currency_precision,
+				)
+
 		return super().get_buying_amount(row, item_code)
 
 	def get_buying_amount_from_product_bundle(self, row, product_bundle):
