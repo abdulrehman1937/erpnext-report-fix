@@ -7,9 +7,12 @@ app_license = "mit"
 
 required_apps = ["erpnext"]
 
-# Ensure patch is registered when hooks are loaded (import side effects).
-# pylint: disable=unused-import
-import erpnext_report_fix.monkeypatch  # noqa: F401
+# Frappe v16 caches hooks in Redis and does not re-import hooks.py in worker
+# processes, so a module-level import side-effect is unreliable. The
+# before_request hook is resolved by name from the Redis cache and is called
+# by Frappe before every HTTP request, guaranteeing the patch is applied in
+# each worker process before any report can run.
+before_request = ["erpnext_report_fix.monkeypatch.apply_patch"]
 
 after_install = "erpnext_report_fix.install.after_install"
 before_uninstall = "erpnext_report_fix.uninstall.before_uninstall"
