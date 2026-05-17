@@ -1,0 +1,15 @@
+[project]
+name = "erpnext_report_fix"
+authors = [{ name = "Abdul Rehman" }]
+description = "Monkey-patch for ERPNext Gross Profit report: correct COGS for product bundles (Packed Item SLE voucher_detail_no)"
+requires-python = ">=3.10"
+readme = "README.md"
+version = "0.1.0"
+dependencies = []
+
+[build-system]
+requires = ["flit_core >=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.bench.dev-dependencies]
+# Installed and managed by bench when developing on a site.
