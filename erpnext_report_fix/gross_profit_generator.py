@@ -48,8 +48,8 @@ class GrossProfitGeneratorFixed(GrossProfitGenerator):
 		self._fix_packed_item_voucher_detail_no(row)
 
 		# process() leaves product_bundles=[] when update_stock=False and dn_detail=None,
-		# so bundle parent rows fall through here and super() returns 0 (non-stock, no SLE).
-		# Intercept: look up SI packed items and compute per-component buying amount instead.
+		# so bundle parent rows fall through here. For non-stock bundle parents super()
+		# returns 0 (no SLEs). Resolve packed items from SI → SO → bundle definition.
 		if not row.get("update_stock") and not row.get("dn_detail") and row.get("parent"):
 			si_bundles = (
 				self.product_bundles.get("Sales Invoice", {})
@@ -61,7 +61,65 @@ class GrossProfitGeneratorFixed(GrossProfitGenerator):
 					self.currency_precision,
 				)
 
+			# SI with update_stock=False usually has no tabPacked Item rows. Fall back to
+			# the linked Sales Order, scaling qty if the SI invoices only part of the SO.
+			if row.get("sales_order") and row.get("so_detail"):
+				so_packed = (
+					self.product_bundles.get("Sales Order", {})
+					.get(row.get("sales_order"), frappe._dict())
+					.get(item_code, [])
+				)
+				so_packed = [
+					p for p in so_packed
+					if p.get("parent_detail_docname") == row.get("so_detail")
+				]
+				if so_packed:
+					return flt(
+						self._buying_amount_from_packed_list(row, so_packed),
+						self.currency_precision,
+					)
+
+			# Last resort: synthesize components from the Product Bundle definition.
+			if frappe.db.exists("Product Bundle", item_code):
+				return flt(
+					self._buying_amount_from_bundle_definition(row, item_code),
+					self.currency_precision,
+				)
+
 		return super().get_buying_amount(row, item_code)
+
+	def _buying_amount_from_packed_list(self, row, packed_list):
+		"""Sum buying amount across pre-filtered packed items, scaling for partial invoicing."""
+		scale = 1.0
+		if row.get("so_detail") and row.get("qty"):
+			so_qty = frappe.db.get_value("Sales Order Item", row.get("so_detail"), "qty")
+			if so_qty:
+				scale = flt(row.qty) / flt(so_qty)
+		buying_amount = 0.0
+		for packed_item in packed_list:
+			packed_item_row = row.copy()
+			packed_item_row.item_code = packed_item.item_code
+			packed_item_row.warehouse = packed_item.warehouse
+			packed_item_row.qty = (packed_item.total_qty * -1) * scale
+			packed_item_row.serial_and_batch_bundle = packed_item.serial_and_batch_bundle
+			packed_item_row.item_row = packed_item.name
+			buying_amount += self.get_buying_amount(packed_item_row, packed_item.item_code)
+		return buying_amount
+
+	def _buying_amount_from_bundle_definition(self, row, item_code):
+		"""Compute COGS by walking the Product Bundle definition × row.qty."""
+		components = frappe.db.get_all(
+			"Product Bundle Item",
+			filters={"parent": item_code},
+			fields=["item_code", "qty"],
+		)
+		buying_amount = 0.0
+		for component in components:
+			component_row = row.copy()
+			component_row.item_code = component.item_code
+			component_row.qty = flt(component.qty) * flt(row.qty)
+			buying_amount += self.get_buying_amount(component_row, component.item_code)
+		return buying_amount
 
 	def get_buying_amount_from_product_bundle(self, row, product_bundle):
 		buying_amount = 0.0
